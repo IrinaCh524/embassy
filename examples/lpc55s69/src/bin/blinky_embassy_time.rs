@@ -48,11 +48,23 @@ impl RtcDriver {
         let pmc = unsafe { &*PMC::ptr() };
         let rtc = unsafe { &*RTC::ptr() };
 
+        // ?
         syscon.ahbclkctrl0.modify(|_, w| w.rtc().enable());
+
+        // By default the RTC enters software reset. If for some reason it is
+        // not in reset, we enter and them promptly leave.q
         rtc.ctrl.modify(|_, w| w.swreset().set_bit());
         rtc.ctrl.modify(|_, w| w.swreset().clear_bit());
-        pmc.rtcosc32k.write(|w| w.sel().xtal32k());
+
+        // Select clock source - either XTAL or FRO
+        // pmc.rtcosc32k.write(|w| w.sel().xtal32k());
+        pmc.rtcosc32k.write(|w| w.sel().fro32k());
+
+        // Start the RTC peripheral
         rtc.ctrl.modify(|_, w| w.rtc_osc_pd().power_up());
+
+        // rtc.ctrl.modify(|_, w| w.rtc_en().clear_bit()); // EXTRA
+
         //reset/clear(?) conter
         rtc.count.reset();
         //en rtc main counter
@@ -60,6 +72,7 @@ impl RtcDriver {
         rtc.ctrl.modify(|_, w| w.rtc1khz_en().set_bit());
         // subsec counter enable
         rtc.ctrl.modify(|_, w| w.rtc_subsec_ena().set_bit());
+
         let mut cp = cortex_m::peripheral::Peripherals::take().unwrap();
         unsafe { cp.NVIC.set_priority(interrupt::RTC, 3) };
         unsafe { cortex_m::peripheral::NVIC::unmask(interrupt::RTC) };
@@ -139,9 +152,20 @@ impl Driver for RtcDriver {
     fn now(&self) -> u64 {
         defmt::info!("now");
         let rtc = unsafe { &*RTC::ptr() };
-        let sec = rtc.count.read().val().bits() as u64;
-        let sub = rtc.subsec.read().subsec().bits() as u64;
-        sec * 32768 + sub
+
+        loop {
+            let sec = rtc.count.read().val().bits() as u64;
+            let sub = rtc.subsec.read().subsec().bits() as u64;
+            let total_ticks_1 = sec * 32768 + sub;
+
+            let sec = rtc.count.read().val().bits() as u64;
+            let sub = rtc.subsec.read().subsec().bits() as u64;
+            let total_ticks_2 = sec * 32768 + sub;
+
+            if total_ticks_1 == total_ticks_2 {
+                return total_ticks_1;
+            }
+        }
     }
 
     fn schedule_wake(&self, at: u64, waker: &Waker) {
@@ -160,87 +184,25 @@ impl Driver for RtcDriver {
 }
 #[cortex_m_rt::interrupt]
 fn RTC() {
-    // info!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
-    // critical_section::with(|cs| {
-    //     let rtc = unsafe { &*RTC::ptr() };
-    //     let flags = rtc.ctrl.read();
-    //     if flags.alarm1hz().bit_is_clear() {
-    //         rtc.ctrl.modify(|_, w| w.alarm1hz().set_bit());
-    //     }
-
-    //     if flags.wake1khz().bit_is_clear() {
-    //         rtc.ctrl.modify(|_, w| w.wake1khz().set_bit());
-    //     }
-    // });
     DRIVER.on_interrupt();
-}
-pub(crate) fn init() {
-    DRIVER.init();
 }
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
-    // defmt::info!("init");
-    // let syscon = unsafe { &*SYSCON::ptr() };
-    // let pmc = unsafe { &*PMC::ptr() };
-    // let rtc = unsafe { &*RTC::ptr() };
-
-    // syscon.ahbclkctrl0.modify(|_, w| w.rtc().enable());
-    // rtc.ctrl.modify(|_, w| w.swreset().set_bit());
-    // rtc.ctrl.modify(|_, w| w.swreset().clear_bit());
-    // pmc.rtcosc32k.write(|w| w.sel().xtal32k());
-    // rtc.ctrl.modify(|_, w| w.rtc_osc_pd().power_up());
-    // //reset/clear(?) conter
-    // // rtc.count.write(|w| unsafe {w.bits(0)});
-    // rtc.count.reset();
-    // //en rtc main counter
-    // rtc.ctrl.modify(|_, w| w.rtc_en().set_bit());
-    // rtc.ctrl.modify(|_, w| w.rtc1khz_en().set_bit());
-    // // subsec counter enable
-    // rtc.ctrl.modify(|_, w| w.rtc_subsec_ena().set_bit());
-    // let mut cp = cortex_m::peripheral::Peripherals::take().unwrap();
-    // unsafe { cp.NVIC.set_priority(interrupt::RTC, 3) };
-    // unsafe { cortex_m::peripheral::NVIC::unmask(interrupt::RTC) };
-    // let n = {
-    //     let rtc = unsafe { &*RTC::ptr() };
-    //     let sec = rtc.count.read().val().bits() as u64;
-    //     let sub = rtc.subsec.read().subsec().bits() as u64;
-    //     sec * 32768 + sub
-    // };
-    // let timestamp = n + 32768 * 5;
-    // //time diff in sub-sec not ticks (32kHz)
-    // let diff = timestamp - n;
-    // let sec = (diff / 32768) as u32;
-    // let subsec = (diff % 32768) as u32;
-
-    // let current_sec = rtc.count.read().val().bits();
-    // let target_sec = current_sec.wrapping_add(sec as u32);
-
-    // rtc.match_.write(|w| unsafe { w.matval().bits(target_sec) });
-    // rtc.wake.write(|w| unsafe {
-    //     let ms = ((subsec * 1000) + 16384) / 32768;
-    //     w.val().bits(ms as u16)
-    // });
-    // rtc.ctrl.modify(|_, w| w.alarm1hz().clear_bit().wake1khz().clear_bit());
-
     let p = embassy_nxp::init(Default::default());
+    DRIVER.init();
 
-    init();
-    Timer::after_millis(200);
-    // info!("{:?}", &t);
-    // t.await;
-    // embassy_nxp::time_driver::init();
-
-    info!("1 AAAAAAAA");
+    info!("Initialization complete");
     let mut led = Output::new(p.PIO1_6, Level::Low);
-    info!("2 AAAAAAAA");
-    loop {
-        // info!("led off!");
-        // led.set_high();
-        // Timer::after_secs(1).await;
 
-        // info!("led on!");
-        // led.set_low();
-        // Timer::after_secs(1).await;
+    info!("Entering main loop");
+    loop {
+        info!("led off!");
+        led.set_high();
+        Timer::after_secs(1).await;
+
+        info!("led on!");
+        led.set_low();
+        Timer::after_secs(1).await;
     }
 }
