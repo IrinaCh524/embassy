@@ -35,21 +35,34 @@ impl RtcDriver {
         let pmc = unsafe { &*PMC::ptr() };
         let rtc = unsafe { &*RTC::ptr() };
 
+        // ?
         syscon.ahbclkctrl0.modify(|_, w| w.rtc().enable());
+
+        // By default the RTC enters software reset. If for some reason it is
+        // not in reset, we enter and them promptly leave.q
         rtc.ctrl.modify(|_, w| w.swreset().set_bit());
         rtc.ctrl.modify(|_, w| w.swreset().clear_bit());
-        pmc.rtcosc32k.write(|w| w.sel().xtal32k());
+
+        // Select clock source - either XTAL or FRO
+        // pmc.rtcosc32k.write(|w| w.sel().xtal32k());
+        pmc.rtcosc32k.write(|w| w.sel().fro32k());
+
+        // Start the RTC peripheral
         rtc.ctrl.modify(|_, w| w.rtc_osc_pd().power_up());
-        //reset/clear(?) conter
+
+        // rtc.ctrl.modify(|_, w| w.rtc_en().clear_bit()); // EXTRA
+
+        //reset/clear(?) counter
         rtc.count.reset();
         //en rtc main counter
         rtc.ctrl.modify(|_, w| w.rtc_en().set_bit());
         rtc.ctrl.modify(|_, w| w.rtc1khz_en().set_bit());
         // subsec counter enable
         rtc.ctrl.modify(|_, w| w.rtc_subsec_ena().set_bit());
+
         let mut cp = cortex_m::peripheral::Peripherals::take().unwrap();
         unsafe { cp.NVIC.set_priority(interrupt::RTC, 3) };
-        unsafe { NVIC::unmask(interrupt::RTC) };
+        unsafe { cortex_m::peripheral::NVIC::unmask(interrupt::RTC) };
     }
 
     fn set_alarm(&self, cs: CriticalSection, timestamp: u64) -> bool {
@@ -73,11 +86,11 @@ impl RtcDriver {
 
         rtc.match_.write(|w| unsafe { w.matval().bits(target_sec) });
         rtc.wake.write(|w| unsafe {
-            let ms = ((subsec * 1000) + 16384) / 32768;
+            let ms = (subsec * 1000) / 32768;
             w.val().bits(ms as u16)
         });
         if subsec > 0 {
-            let ms = ((subsec * 1000) + 16384) / 32768;
+            let ms = (subsec * 1000) / 32768;
             rtc.wake.write(|w| unsafe { w.val().bits(ms as u16) });
         }
         rtc.ctrl.modify(|_, w| w.alarm1hz().clear_bit().wake1khz().clear_bit());
@@ -105,11 +118,13 @@ impl RtcDriver {
         alarm.timestamp.set(u64::MAX);
         let mut next = self.queue.borrow(cs).borrow_mut().next_expiration(self.now());
         if next == u64::MAX {
+            // no scheduled events, skipping
             return;
         }
         while !self.set_alarm(cs, next) {
             next = self.queue.borrow(cs).borrow_mut().next_expiration(self.now());
             if next == u64::MAX {
+                //no next event found after retry
                 return;
             }
         }
@@ -120,9 +135,20 @@ impl Driver for RtcDriver {
     //read time:sec+wake count in ms
     fn now(&self) -> u64 {
         let rtc = unsafe { &*RTC::ptr() };
-        let sec = rtc.count.read().val().bits() as u64;
-        let sub = rtc.subsec.read().subsec().bits() as u64;
-        sec * 32768 + sub
+
+        loop {
+            let sec = rtc.count.read().val().bits() as u64;
+            let sub = rtc.subsec.read().subsec().bits() as u64;
+            let total_ticks_1 = sec * 32768 + sub;
+
+            let sec = rtc.count.read().val().bits() as u64;
+            let sub = rtc.subsec.read().subsec().bits() as u64;
+            let total_ticks_2 = sec * 32768 + sub;
+
+            if total_ticks_1 == total_ticks_2 {
+                return total_ticks_1;
+            }
+        }
     }
 
     fn schedule_wake(&self, at: u64, waker: &Waker) {
@@ -142,6 +168,7 @@ impl Driver for RtcDriver {
 fn RTC() {
     DRIVER.on_interrupt();
 }
-pub(crate) fn init() {
+
+pub fn init() {
     DRIVER.init();
 }
